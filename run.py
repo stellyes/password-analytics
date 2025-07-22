@@ -1,19 +1,23 @@
 import math
 import os
 import time
+from math import atan2, degrees, sqrt
+from multiprocessing import Pool, cpu_count, current_process
 import matplotlib
 import matplotlib.pyplot as plt
-from math import atan2, degrees
-from fractions import Fraction
 
-matplotlib.use('Agg')  # Non-interactive backend for saving images
+matplotlib.use('Agg')
 
+# ---------------------------
+# GRID UTILS
+# ---------------------------
 def dot_coords(n):
-    """Map dot numbers to grid coordinates."""
     return {i * n + j + 1: (i, j) for i in range(n) for j in range(n)}
 
+def coord_to_dot(coord, grid_size):
+    return coord[0] * grid_size + coord[1] + 1
+
 def dots_between(a, b, grid_size):
-    """Return intermediate dots between a and b (exclusive) in straight line."""
     (r1, c1), (r2, c2) = a, b
     dr, dc = r2 - r1, c2 - c1
     gcd = math.gcd(dr, dc)
@@ -22,79 +26,117 @@ def dots_between(a, b, grid_size):
     step_r, step_c = dr // gcd, dc // gcd
     return [(r1 + step_r * k, c1 + step_c * k) for k in range(1, gcd)]
 
-def dfs(visited, current, path, all_paths, grid_size):
-    if len(path) >= 4:
-        all_paths.append(path[:])
-    if len(path) == grid_size ** 2:
-        return  # Full grid
-
-    for next_dot in visited.keys():
-        if not visited[next_dot]:
-            r1, c1 = dot_coords(grid_size)[current]
-            r2, c2 = dot_coords(grid_size)[next_dot]
-            between = dots_between((r1, c1), (r2, c2), grid_size)
-            if all(visited[coord_to_dot(pos, grid_size)] for pos in between):
-                visited[next_dot] = True
-                path.append(next_dot)
-                dfs(visited, next_dot, path, all_paths, grid_size)
-                path.pop()
-                visited[next_dot] = False
-
-def coord_to_dot(coord, grid_size):
-    """Convert (row, col) to dot number."""
-    return coord[0] * grid_size + coord[1] + 1
-
-def generate_passwords(grid_size=3):
-    coords_map = dot_coords(grid_size)
-    all_paths = []
-    visited = {dot: False for dot in coords_map}
-    for start in coords_map:
-        visited[start] = True
-        dfs(visited, start, [start], all_paths, grid_size)
-        visited[start] = False
-    # Convert dot numbers to grid coordinates
-    grid_paths = [[coords_map[dot] for dot in path] for path in all_paths]
-    return grid_paths
-
-# Complexity scoring: turns + long jumps
+# ---------------------------
+# COMPLEXITY SCORING
+# ---------------------------
 def compute_complexity(path):
-    score = 0
+    score = 0.0
     for i in range(1, len(path) - 1):
         x1, y1 = path[i - 1]
         x2, y2 = path[i]
         x3, y3 = path[i + 1]
 
-        # Angle change
+        # Angle sharpness (larger angles = more complex)
         angle1 = atan2(y2 - y1, x2 - x1)
         angle2 = atan2(y3 - y2, x3 - x2)
-        if degrees(angle1 - angle2) % 360 not in [0, 180]:
-            score += 1  # Change in direction
+        angle_diff = abs(degrees(angle1 - angle2)) % 360
+        if angle_diff > 180:
+            angle_diff = 360 - angle_diff
+        score += angle_diff / 45  # Normalize (every 45° adds 1 point)
 
-        # Long move detection
-        if abs(x1 - x2) > 1 or abs(y1 - y2) > 1:
-            score += 2  # Long step = more complex
-
+        # Line length factor (longer lines = more complex)
+        dist = sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        score += dist
     return score
 
-def get_most_complex_passwords(passwords, top_n=5):
-    scored = [(path, compute_complexity(path)) for path in passwords]
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [path for path, _ in scored[:top_n]]
+# ---------------------------
+# DFS WORKER
+# ---------------------------
+def dfs_worker(args):
+    start_dot, grid_size, coords_map, current_max_complexity, progress_interval = args
+    visited = {dot: False for dot in coords_map}
+    visited[start_dot] = True
+    local_top = []
+    local_max_complexity = current_max_complexity
+    path_count = 0
+    total_permutations = math.factorial(grid_size ** 2 - 1)
 
+    def dfs(current, path):
+        nonlocal path_count, local_max_complexity, local_top
+        if len(path) == grid_size ** 2:
+            coords_path = [coords_map[dot] for dot in path]
+            complexity = compute_complexity(coords_path)
+
+            if complexity > local_max_complexity:
+                local_max_complexity = complexity
+                local_top = [(complexity, coords_path)]  # Clear and store only new max
+            elif complexity == local_max_complexity:
+                local_top.append((complexity, coords_path))
+
+            path_count += 1
+            if path_count % progress_interval == 0:
+                percent = (path_count / total_permutations) * 100
+                os.system('cls' if os.name == 'nt' else 'clear')  # Clear console
+                print(f"[{current_process().name}] Progress: {percent:.2f}% | "
+                      f"Patterns Checked: {path_count:,}")
+            return
+
+        for next_dot in visited:
+            if not visited[next_dot]:
+                r1, c1 = coords_map[current]
+                r2, c2 = coords_map[next_dot]
+                between = dots_between((r1, c1), (r2, c2), grid_size)
+                if all(visited[coord_to_dot(p, grid_size)] for p in between):
+                    visited[next_dot] = True
+                    path.append(next_dot)
+                    dfs(next_dot, path)
+                    path.pop()
+                    visited[next_dot] = False
+
+    dfs(start_dot, [start_dot])
+    print(f"[{current_process().name}] Finished. {path_count} full-grid paths explored.")
+    return local_top, local_max_complexity
+
+# ---------------------------
+# GENERATE PASSWORDS
+# ---------------------------
+def generate_passwords(grid_size=3, progress_interval=100000):
+    coords_map = dot_coords(grid_size)
+    dots = list(coords_map.keys())
+    current_max_complexity = -float('inf')
+    args_list = [(dot, grid_size, coords_map, current_max_complexity, progress_interval) for dot in dots]
+
+    with Pool(processes=min(cpu_count(), len(dots))) as pool:
+        worker_results = pool.map(dfs_worker, args_list)
+
+    global_top = []
+    global_max_complexity = -float('inf')
+    for worker_top, worker_max in worker_results:
+        if worker_max > global_max_complexity:
+            global_max_complexity = worker_max
+            global_top = worker_top[:]
+        elif worker_max == global_max_complexity:
+            global_top.extend(worker_top)
+
+    global_top.sort(reverse=True)
+    return [path for _, path in global_top], global_max_complexity
+
+# ---------------------------
+# RENDER IMAGES
+# ---------------------------
 def save_paths_as_images(passwords, grid_size=3, folder="output"):
-    timestamp = str(int(time.time()))  # Timestamp folder
+    timestamp = str(int(time.time()))
     output_folder = os.path.join(folder, timestamp)
     os.makedirs(output_folder, exist_ok=True)
-    
+
     for i, path in enumerate(passwords):
-        x_coords = [point[1] for point in path]
-        y_coords = [grid_size - 1 - point[0] for point in path]  # Flip y for plotting
+        x_coords = [p[1] for p in path]
+        y_coords = [grid_size - 1 - p[0] for p in path]
 
         plt.figure(figsize=(6, 6))
         plt.scatter(x_coords, y_coords, color='black', zorder=5)
         plt.plot(x_coords, y_coords, color='black', marker='o', zorder=4)
 
-        # Labels
         for idx, (x, y) in enumerate(zip(x_coords, y_coords)):
             plt.text(x + 0.1, y + 0.1, f'{idx+1}', fontsize=9, color='black')
 
@@ -108,17 +150,22 @@ def save_paths_as_images(passwords, grid_size=3, folder="output"):
         plt.close()
         print(f"Saved image: {image_filename}")
 
-# Main
+# ---------------------------
+# MAIN
+# ---------------------------
 if __name__ == "__main__":
-    grid_size = int(input("What size grid do you want to calculate passwords for?: "))  
-    print(f"Generating patterns for {grid_size}x{grid_size} grid...")
-    passwords = generate_passwords(grid_size)
-    print(f"Generated {len(passwords)} total patterns.")
+    grid_size = 4
+    progress_interval = 100000  # Print progress every N patterns
 
-    most_complex_passwords = get_most_complex_passwords(passwords, top_n=5)
-    print(f"Top {len(most_complex_passwords)} most complex patterns:")
-    for password in most_complex_passwords:
-        print(password)
+    print(f"Generating most complex full-grid patterns for {grid_size}x{grid_size}...\n")
+    start_time = time.time()
+    passwords, max_complexity = generate_passwords(grid_size, progress_interval)
+    duration = time.time() - start_time
 
-    save_paths_as_images(most_complex_passwords, grid_size)
-    print(f"Total patterns considered: {len(passwords)}")
+    print(f"\nGeneration complete in {duration:.2f} seconds.")
+    print(f"\nMost complex patterns (complexity = {max_complexity:.2f}):")
+    for path in passwords:
+        print(path)
+
+    save_paths_as_images(passwords, grid_size)
+    print(f"\nTotal patterns saved: {len(passwords)}")
