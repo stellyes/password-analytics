@@ -44,19 +44,60 @@ class PatternEnv(gym.Env):
             reward = -0.5  # discourage staying in place
             done = True
         else:
-            self.visited[action] = 1
-            self.path.append(action)
-            self.current_pos = action
+            intermediate = self.get_intermediate_dots(self.current_pos, action)
+            invalid = any(self.visited[i] for i in intermediate)
 
-            if len(self.path) == self.total_dots:
-                coords_path = [self.coords_map[dot + 1] for dot in self.path]
-                reward = compute_complexity(coords_path)
+            if invalid:
+                reward = -1.0
                 done = True
             else:
-                # reward shaping
-                reward = 0.1 + len(self.path) * 0.05
+                for i in intermediate:
+                    self.visited[i] = 1
+                    self.path.append(i)
+
+                self.visited[action] = 1
+                self.path.append(action)
+                self.current_pos = action
+
+                if len(self.path) == self.total_dots:
+                    coords_path = [self.coords_map[dot + 1] for dot in self.path]
+                    reward = compute_complexity(coords_path)
+                    done = True
+                else:
+                    reward = 0.1 + len(self.path) * 0.05
+
+        # If done early (not full path), penalize strongly
+        if done and len(self.path) < self.total_dots:
+            reward = -1.0
 
         return self.visited.copy(), reward, done, truncated, {}
+
+    
+    def get_intermediate_dots(self, start, end):
+        """Return all intermediate dots passed through in a straight line."""
+        x1, y1 = self.coords_map[start + 1]
+        x2, y2 = self.coords_map[end + 1]
+
+        dx = x2 - x1
+        dy = y2 - y1
+
+        # Only consider straight lines or diagonals
+        steps = max(abs(dx), abs(dy))
+        if steps <= 1:
+            return []  # no intermediates needed
+
+        intermediates = []
+        for i in range(1, steps):
+            x = x1 + i * dx // steps
+            y = y1 + i * dy // steps
+            # Find the dot index from (x, y)
+            for dot_idx, coord in self.coords_map.items():
+                if coord == (x, y):
+                    intermediates.append(dot_idx - 1)  # back to 0-indexed
+                    break
+
+        return intermediates
+
 
 
 
@@ -73,10 +114,10 @@ def dot_coords(n):
 def angle_score(p1, p2, p3):
     angle1 = atan2(p2[1] - p1[1], p2[0] - p1[0])
     angle2 = atan2(p3[1] - p2[1], p3[0] - p2[0])
-    delta = abs(degrees(angle2 - angle1)) % 360
+    delta = abs(degrees(angle2 - angle1) - 180) % 360
     if delta > 180:
         delta = 360 - delta
-    return (180 - delta) / 180  # sharper = closer to 1
+    return (delta) / 180  # sharper = closer to 1
 
 
 def direction_category(p1, p2):
@@ -137,14 +178,23 @@ def compute_complexity(path, grid_size=4):
         score += angle_weight * angle_score((x1, y1), (x2, y2), (x3, y3))
 
         dist = sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-        score += length_weight * dist
+        # Penalize vertical or horizontal segments
+        is_straight = (x1 == x2 or y1 == y2)
+        straight_penalty = -0.3 if is_straight else 0.0
+
+        score += length_weight * dist + straight_penalty
 
     # Final segment
     if len(path) >= 2:
         x1, y1 = path[-2]
         x2, y2 = path[-1]
         dist = sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-        score += length_weight * dist
+        
+        # See above
+        is_straight = (x1 == x2 or y1 == y2)
+        straight_penalty = -0.3 if is_straight else 0.0
+
+        score += length_weight * dist + straight_penalty
 
     # Direction change reward
     score += direction_change_weight * count_direction_changes(path)

@@ -15,24 +15,35 @@ class BestPatternsCallback(BaseCallback):
         super().__init__(verbose)
         self.top_n = top_n
         self.top_patterns = []
+        self.last_display_update = -10  # ensures display on first run
 
     def _on_step(self) -> bool:
         rewards = self.locals.get("rewards", [None])
-        reward = rewards[0] if rewards else None
+        reward = rewards[0] if hasattr(rewards, 'any') and rewards.any() else None
 
         if reward is not None:
             current_path = self.training_env.get_attr("path")[0].copy()
             current_path = [int(dot) for dot in current_path]
 
-            # Add if new high score
+            # Add new reward
             self.top_patterns.append((reward, current_path))
             self.top_patterns = sorted(self.top_patterns, key=lambda x: -x[0])[:self.top_n]
 
-            if self.verbose:
-                print(f"Step {self.num_timesteps} — Top {self.top_n} Rewards:")
-                for i, (r, path) in enumerate(self.top_patterns):
-                    print(f" {i+1}: {r:.2f} — {path}")
+        # Clear and print stats every 10 steps
+        if self.num_timesteps - self.last_display_update >= 1000:
+            self.last_display_update = self.num_timesteps
+
+            os.system('cls' if os.name == 'nt' else 'clear')
+            print(f"Step: {self.num_timesteps}")
+            if reward is not None:
+                print(f"Latest reward: {reward:.4f}")
+            print("\nTop Patterns:")
+            for i, (r, path) in enumerate(self.top_patterns, 1):
+                print(f" {i}. Reward: {r:.4f} — Path: {path}")
+            print("\n---")
+
         return True
+
 
 # -----------------------------
 # Visualize best pattern
@@ -66,7 +77,7 @@ def main():
     model_path = "model"
 
     # Create environments
-    envs = [lambda: PatternEnv(grid_size=grid_size) for _ in range(num_envs)]
+    envs = [lambda gs=grid_size: PatternEnv(grid_size=gs) for _ in range(num_envs)]
     env = VecMonitor(SubprocVecEnv(envs))
 
     # Load or initialize PPO model
@@ -94,14 +105,14 @@ def main():
         eval_env,
         best_model_save_path="./logs/best_model",
         log_path="./logs/eval",
-        eval_freq=10_000,
+        eval_freq=100000,
         deterministic=True,
         render=False
     )
 
     # Training
     model.learn(
-        total_timesteps=500_000,
+        total_timesteps=10_000_000,
         callback=[best_patterns_callback, eval_callback]
     )
 
@@ -109,13 +120,10 @@ def main():
     env.close()
 
     print("\nTraining complete!")
-    if best_patterns_callback.top_patterns:
-        best_reward, best_pattern = best_patterns_callback.top_patterns[0]
-        print(f"Best reward: {best_reward:.2f}")
-        print(f"Best pattern: {best_pattern}")
-        render_best_pattern(best_pattern, grid_size)
-    else:
-        print("No valid pattern discovered during training.")
+    best_reward, best_pattern = best_patterns_callback.top_patterns[0]
+    print(f"Best reward: {best_reward:.2f}")
+    print(f"Best pattern: {best_pattern}")
+    render_best_pattern(best_pattern, grid_size)
 
     print("Saving model...")
     model.save(model_path)
