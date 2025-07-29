@@ -1,31 +1,38 @@
-import gc
+import os
 import torch
 import matplotlib.pyplot as plt
+
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
-from stable_baselines3.common.vec_env import SubprocVecEnv
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from pattern_env import PatternEnv, dot_coords
 
-
 # -----------------------------
-# Callback to track best pattern
+# Callback to track best N patterns
 # -----------------------------
-class BestPatternCallback(BaseCallback):
-    def __init__(self, verbose=0):
+class BestPatternsCallback(BaseCallback):
+    def __init__(self, top_n=5, verbose=0):
         super().__init__(verbose)
-        self.best_reward = -float("inf")
-        self.best_pattern = None
+        self.top_n = top_n
+        self.top_patterns = []
 
     def _on_step(self) -> bool:
-        reward = self.locals.get("rewards", [None])[0]
-        if reward is not None and reward > self.best_reward:
-            self.best_reward = reward
-            self.best_pattern = [int(dot) for dot in self.training_env.get_attr("path")[0].copy()]
+        rewards = self.locals.get("rewards", [None])
+        reward = rewards[0] if rewards else None
+
+        if reward is not None:
+            current_path = self.training_env.get_attr("path")[0].copy()
+            current_path = [int(dot) for dot in current_path]
+
+            # Add if new high score
+            self.top_patterns.append((reward, current_path))
+            self.top_patterns = sorted(self.top_patterns, key=lambda x: -x[0])[:self.top_n]
+
             if self.verbose:
-                print(f"New best reward: {reward:.2f} | Path: {self.best_pattern}")
+                print(f"Step {self.num_timesteps} — Top {self.top_n} Rewards:")
+                for i, (r, path) in enumerate(self.top_patterns):
+                    print(f" {i+1}: {r:.2f} — {path}")
         return True
-    
 
 # -----------------------------
 # Visualize best pattern
@@ -35,7 +42,7 @@ def render_best_pattern(path, grid_size):
     coords_path = [coords_map[dot + 1] for dot in path]
 
     x = [c[1] for c in coords_path]
-    y = [grid_size - 1 - c[0] for c in coords_path]  # Flip for display
+    y = [grid_size - 1 - c[0] for c in coords_path]  # Flip vertically
 
     plt.figure(figsize=(6, 6))
     plt.plot(x, y, marker='o', color='black', zorder=3)
@@ -55,39 +62,64 @@ def render_best_pattern(path, grid_size):
 # -----------------------------
 def main():
     grid_size = 4
-
-    # Create 10 environments for parallel training
     num_envs = 10
-    envs = [lambda gs=grid_size: PatternEnv(grid_size=gs) for _ in range(num_envs)]
+    model_path = "model"
 
-    env = SubprocVecEnv(envs)  # This will run environments in parallel processes
+    # Create environments
+    envs = [lambda: PatternEnv(grid_size=grid_size) for _ in range(num_envs)]
+    env = VecMonitor(SubprocVecEnv(envs))
 
-    model = PPO(
-        policy="MlpPolicy",
-        env=env,
-        verbose=1,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+    # Load or initialize PPO model
+    if os.path.exists(f"{model_path}.zip"):
+        print("Loading existing model...")
+        model = PPO.load(
+            model_path,
+            env=env,
+            device="cuda" if torch.cuda.is_available() else "cpu"
+        )
+    else:
+        print("Creating new model...")
+        model = PPO(
+            policy="MlpPolicy",
+            env=env,
+            verbose=1,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            tensorboard_log="./ppo_tensorboard/"
+        )
+
+    # Callbacks
+    best_patterns_callback = BestPatternsCallback(top_n=5, verbose=1)
+    eval_env = PatternEnv(grid_size=grid_size)
+    eval_callback = EvalCallback(
+        eval_env,
+        best_model_save_path="./logs/best_model",
+        log_path="./logs/eval",
+        eval_freq=10_000,
+        deterministic=True,
+        render=False
     )
 
-    callback = BestPatternCallback(verbose=1)
+    # Training
+    model.learn(
+        total_timesteps=500_000,
+        callback=[best_patterns_callback, eval_callback]
+    )
 
-    model.learn(total_timesteps=500_000, callback=callback)
+    # Cleanup
+    env.close()
 
     print("\nTraining complete!")
-    print(f"Best reward: {callback.best_reward:.2f}")
-    print(f"Best pattern: {callback.best_pattern}")
-
-    # Force close env
-    print("Closing environment...")
-    env.close()
-    del env
-    gc.collect()
-    print("Environment closed.")
+    if best_patterns_callback.top_patterns:
+        best_reward, best_pattern = best_patterns_callback.top_patterns[0]
+        print(f"Best reward: {best_reward:.2f}")
+        print(f"Best pattern: {best_pattern}")
+        render_best_pattern(best_pattern, grid_size)
+    else:
+        print("No valid pattern discovered during training.")
 
     print("Saving model...")
-    model.save("model")
-    print("Model saved as 'model.zip'")
-
+    model.save(model_path)
+    print(f"Model saved to '{model_path}.zip'")
 
 if __name__ == "__main__":
     main()
