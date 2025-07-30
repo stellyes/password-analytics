@@ -24,7 +24,7 @@ class PatternEnv(gymnasium.Env):
         # or, the "player" starts the game
         super().reset(seed=seed)
         if seed is not None:
-            self.player, _ = gymnasium.utils.seeding.np_random(seed)
+            self.np_random, _ = gymnasium.utils.seeding.np_random(seed)
 
         # To keep track of the player's path
         self.path = []
@@ -32,7 +32,7 @@ class PatternEnv(gymnasium.Env):
 
         # "I'm giving my player the map, and a 'you are here' mark"
         # I'm already over this analogy
-        start = self.player.integers(self.coordinates)
+        start = self.np_random.integers(self.coordinates)
         self.visited[start] = 1
         self.path.append(start)
         self.current_position = start
@@ -83,13 +83,13 @@ class PatternEnv(gymnasium.Env):
                     # Multiplier for longer paths
                     reward += 0.05 + len(self.path) * 0.025
 
-        return self.visited.copy(), reward, done, truncated, {}
+        return self.visited.copy(), reward, done, False, {}
 
 
     def get_intermediate_points(self, start, end):
         """Return all intermediate points passed through in a straight line."""
-        x1, y1 = self.coords_map[start + 1]
-        x2, y2 = self.coords_map[end + 1]
+        x1, y1 = self.map[start + 1]
+        x2, y2 = self.map[end + 1]
 
         dx = x2 - x1
         dy = y2 - y1
@@ -104,7 +104,7 @@ class PatternEnv(gymnasium.Env):
             x = x1 + i * dx // steps
             y = y1 + i * dy // steps
             # Find the dot index from (x, y)
-            for dot_idx, coord in self.coords_map.items():
+            for dot_idx, coord in self.map.items():
                 if coord == (x, y):
                     intermediates.append(dot_idx - 1)  # back to 0-indexed
                     break

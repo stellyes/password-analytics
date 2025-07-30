@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
-from pattern_env import PatternEnv, dot_coords
+from pattern_env import PatternEnv, generate_coordinate_map
 
 # -----------------------------
 # Callback to track best N patterns
@@ -49,7 +49,7 @@ class BestPatternsCallback(BaseCallback):
 # Visualize best pattern
 # -----------------------------
 def render_best_pattern(path, grid_size):
-    coords_map = dot_coords(grid_size)
+    coords_map = generate_coordinate_map(grid_size)
     coords_path = [coords_map[dot + 1] for dot in path]
 
     x = [c[1] for c in coords_path]
