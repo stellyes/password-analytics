@@ -1,11 +1,12 @@
+import math
 import gymnasium as gym
 from gymnasium import spaces
-import numpy
+import numpy as np
 from math import atan2, degrees, sqrt
 
 
 class PatternEnv(gym.Env):
-    def __init__(self, grid_size = 4):
+    def __init__(self, grid_size=4):
         super(PatternEnv, self).__init__()
         self.grid_size = grid_size
         self.total_dots = grid_size ** 2
@@ -13,6 +14,8 @@ class PatternEnv(gym.Env):
 
         self.action_space = spaces.Discrete(self.total_dots)
         self.observation_space = spaces.MultiBinary(self.total_dots)
+
+        self.max_steps = self.total_dots * 2  # Optional safeguard
 
         self.reset()
 
@@ -22,7 +25,8 @@ class PatternEnv(gym.Env):
             self.np_random, _ = gym.utils.seeding.np_random(seed)
 
         self.path = []
-        self.visited = numpy.zeros(self.total_dots, dtype=numpy.int8)
+        self.visited = np.zeros(self.total_dots, dtype=np.int8)
+        self.steps = 0
 
         start = self.np_random.integers(self.total_dots)
         self.visited[start] = 1
@@ -31,27 +35,27 @@ class PatternEnv(gym.Env):
 
         return self.visited.copy(), {}
 
-
     def step(self, action):
+        self.steps += 1
         done = False
         reward = 0.0
-        truncated = False  # No time limit logic yet
+        truncated = False
 
         if self.visited[action]:
             reward = -1.0
             done = True
-        elif self.current_pos is not None and action == self.current_pos:
-            reward = -0.5  # discourage staying in place
+        elif action == self.current_pos:
+            reward = -0.5
             done = True
         else:
-            intermediate = self.get_intermediate_dots(self.current_pos, action)
-            invalid = any(self.visited[i] for i in intermediate)
+            intermediates = self.get_intermediate_dots(self.current_pos, action)
+            invalid = any(self.visited[i] for i in intermediates)
 
             if invalid:
                 reward = -1.0
                 done = True
             else:
-                for i in intermediate:
+                for i in intermediates:
                     self.visited[i] = 1
                     self.path.append(i)
 
@@ -59,65 +63,75 @@ class PatternEnv(gym.Env):
                 self.path.append(action)
                 self.current_pos = action
 
-                if len(self.path) == self.total_dots:
+                current_length = len(self.path)
+
+                # Encourage longer paths with a small step bonus
+                reward = 0.05 + 0.025 * current_length
+
+                if current_length == self.total_dots:
                     coords_path = [self.coords_map[dot + 1] for dot in self.path]
                     reward = compute_complexity(coords_path)
                     done = True
-                else:
-                    reward = 0.1 + len(self.path) * 0.05
+                    print("Pattern complete:", self.path)
+                    print("Complexity score:", reward)
 
-        # If done early (not full path), penalize strongly
-        if done and len(self.path) < self.total_dots:
-            reward = -1.0
+                elif self.steps >= self.max_steps:
+                    reward = -1.0
+                    done = True
+                    print("Max steps reached. Path length:", current_length)
+
+                # Discard short patterns explicitly
+                elif current_length < self.grid_size ** 2 - 2:
+                    reward -= 0.5
+                    done = True
+                    print("Short pattern discarded:", [int(p) for p in self.path])
+
+        if done:
+            print("Episode ended. Path length:", len(self.path), "Reward:", reward)
 
         return self.visited.copy(), reward, done, truncated, {}
 
-    
+
     def get_intermediate_dots(self, start, end):
-        """Return all intermediate dots passed through in a straight line."""
         x1, y1 = self.coords_map[start + 1]
         x2, y2 = self.coords_map[end + 1]
 
         dx = x2 - x1
         dy = y2 - y1
 
-        # Only consider straight lines or diagonals
         steps = max(abs(dx), abs(dy))
         if steps <= 1:
-            return []  # no intermediates needed
+            return []
 
         intermediates = []
         for i in range(1, steps):
             x = x1 + i * dx // steps
             y = y1 + i * dy // steps
-            # Find the dot index from (x, y)
             for dot_idx, coord in self.coords_map.items():
                 if coord == (x, y):
-                    intermediates.append(dot_idx - 1)  # back to 0-indexed
+                    intermediates.append(dot_idx - 1)
                     break
 
         return intermediates
 
-
-
-
     def render(self, mode='human'):
-        print("Current path:", self.path)
+        print("🧩 Current path:", self.path)
+
 
 def dot_coords(n):
-    '''Generates grid layout for n x n plot'''
     return {i * n + j + 1: (i, j) for i in range(n) for j in range(n)}
 
-# ---------------------------
-# COMPLEXITY SCORING
-# ---------------------------
+
+# -------- COMPLEXITY SCORING --------
 def angle_score(p1, p2, p3):
     angle1 = atan2(p2[1] - p1[1], p2[0] - p1[0])
     angle2 = atan2(p3[1] - p2[1], p3[0] - p2[0])
-    delta = abs(degrees(angle2 - angle1) - 180) % 360
+    delta = abs(degrees(angle2 - angle1)) % 360
     if delta > 180:
         delta = 360 - delta
-    return (delta) / 180  # sharper = closer to 1
+    if delta % 45 == 0:
+        return delta / 180 * 0.5
+    return delta / 180
 
 
 def direction_category(p1, p2):
@@ -133,7 +147,7 @@ def direction_category(p1, p2):
 def count_direction_changes(path):
     categories = [direction_category(path[i], path[i + 1]) for i in range(len(path) - 1)]
     changes = sum(1 for i in range(1, len(categories)) if categories[i] != categories[i - 1])
-    return changes / max(1, len(categories) - 1)  # normalize to [0,1]
+    return changes / max(1, len(categories) - 1)
 
 
 def angle_variance(path):
@@ -147,7 +161,7 @@ def angle_variance(path):
         if delta > 180:
             delta = 360 - delta
         angles.append(delta)
-    return numpy.std(angles) / 180  # normalized to [0, 1]
+    return np.std(angles) / 180
 
 
 def avg_center_distance(path, grid_size):
@@ -158,61 +172,76 @@ def avg_center_distance(path, grid_size):
     return sum(dists) / len(dists)
 
 
-def compute_complexity(path, grid_size=4):
-    angle_weight = 2.0
-    length_weight = 1.0
-    direction_change_weight = 2.0
-    angle_var_weight = 1.0
-    center_dist_weight = -0.5  # negative to discourage hugging the edges
+def is_standard_angle_segment(p1, p2):
+    dx = abs(p2[0] - p1[0])
+    dy = abs(p2[1] - p1[1])
+    return dx == 0 or dy == 0 or dx == dy
 
-    score = 0.0
 
-    max_segment_length = sqrt(2) * (grid_size - 1)
+def standard_angle_penalty(p1, p2):
+    dx = abs(p2[0] - p1[0])
+    dy = abs(p2[1] - p1[1])
+    if dx == 0 or dy == 0:
+        return -1.0
+    elif dx == dy:
+        return -0.75
+    return 0.5
 
-    # Angle + Length
-    for i in range(1, len(path) - 1):
-        x1, y1 = path[i - 1]
-        x2, y2 = path[i]
-        x3, y3 = path[i + 1]
 
-        score += angle_weight * angle_score((x1, y1), (x2, y2), (x3, y3))
+def compute_complexity(path):
+    if len(path) < 2:
+        return 0.0
 
-        dist = sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-        # Penalize vertical or horizontal segments
-        is_straight = (x1 == x2 or y1 == y2)
-        straight_penalty = -0.3 if is_straight else 0.0
+    total_score = 0.0
+    total_length = 0.0
+    direction_changes = 0
+    angles = []
+    irregular_segments = 0
 
-        score += length_weight * dist + straight_penalty
+    prev_dx, prev_dy = None, None
 
-    # Final segment
-    if len(path) >= 2:
-        x1, y1 = path[-2]
-        x2, y2 = path[-1]
-        dist = sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-        
-        # See above
-        is_straight = (x1 == x2 or y1 == y2)
-        straight_penalty = -0.3 if is_straight else 0.0
+    for i in range(len(path) - 1):
+        x1, y1 = path[i]
+        x2, y2 = path[i + 1]
+        dx = x2 - x1
+        dy = y2 - y1
+        dist = math.hypot(dx, dy)
+        total_length += dist
 
-        score += length_weight * dist + straight_penalty
+        angle_bonus = standard_angle_penalty((x1, y1), (x2, y2))
+        if angle_bonus > 0:
+            irregular_segments += 1
 
-    # Direction change reward
-    score += direction_change_weight * count_direction_changes(path)
+        total_score += dist + angle_bonus
 
-    # Angle variance
-    score += angle_var_weight * angle_variance(path)
+        if prev_dx is not None and prev_dy is not None:
+            if (dx, dy) != (prev_dx, prev_dy):
+                direction_changes += 1
 
-    # Center distance
-    score += center_dist_weight * avg_center_distance(path, grid_size)
+            dot = prev_dx * dx + prev_dy * dy
+            mag1 = math.hypot(prev_dx, prev_dy)
+            mag2 = math.hypot(dx, dy)
+            if mag1 > 0 and mag2 > 0:
+                cos_angle = dot / (mag1 * mag2)
+                cos_angle = max(-1.0, min(1.0, cos_angle))
+                angle = math.acos(cos_angle)
+                angles.append(angle)
 
-    # Normalize
-    max_possible_score = (
-        (len(path) - 2) * (angle_weight * 1 + length_weight * max_segment_length) +
-        length_weight * max_segment_length +
-        direction_change_weight * 1.0 +
-        angle_var_weight * 1.0 +
-        abs(center_dist_weight) * sqrt(2) * (grid_size - 1)
-    )
+        prev_dx, prev_dy = dx, dy
 
-    normalized_score = score / max_possible_score if max_possible_score > 0 else 0.0
-    return max(0.0, normalized_score)  # Clamp to [0, 1]
+    decay_factor = 0.98
+    step_bonus = sum((decay_factor ** i) for i in range(len(path)))
+    total_score += 0.3 * step_bonus
+
+    if len(path) >= 13:
+        total_score += 2.0
+
+    if len(path) > 1:
+        irregular_ratio = irregular_segments / (len(path) - 1)
+        total_score += 2.0 * irregular_ratio
+
+    if len(angles) > 1:
+        angle_var = np.var(angles)
+        total_score += 0.5 * angle_var
+
+    return round(max(0.0, min(total_score, 10.0)), 4)
