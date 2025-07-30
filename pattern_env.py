@@ -48,7 +48,7 @@ class PatternEnv(gymnasium.Env):
                 action == self.current_position:
             # Strongly discouraging staying in  
             # place and revisiting points
-            reward -= 1
+            reward -= 0.5
             done = True
         else:
             intermediates = self.get_intermediate_points(self.current_position, action)
@@ -82,6 +82,9 @@ class PatternEnv(gymnasium.Env):
                 else:
                     # Multiplier for longer paths
                     reward += 0.05 + len(self.path) * 0.025
+
+        if len(self.path) == self.coordinates and done:
+            reward += reward * (1 - len(self.path) - self.coordinates)
 
         return self.visited.copy(), reward, done, False, {}
 
