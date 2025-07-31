@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
-from pattern_env import PatternEnv, dot_coords
+from pattern_env import PatternEnv, generate_coordinate_map
 
 
 # -----------------------------
@@ -20,25 +20,31 @@ class BestPatternsCallback(BaseCallback):
         self.last_display_update = -10
 
     def _on_step(self) -> bool:
-        rewards = self.locals.get("rewards", [None])
-        reward = rewards[0] if hasattr(rewards, 'any') and rewards.any() else None
+        rewards = self.locals.get("rewards", None)
+        if rewards is None:
+            return True
 
-        if reward is not None:
-            current_path = self.training_env.get_attr("path")[0].copy()
-            current_path = [int(dot) for dot in current_path]
+        last_paths = self.training_env.get_attr("last_full_path")
 
-            if len(current_path) == self.grid_size ** 2:
-                # Only keep full-length patterns
-                self.top_patterns.append((reward, current_path))
+        for i, reward in enumerate(rewards):
+            full_path = last_paths[i]
+            if full_path is not None and len(full_path) == self.grid_size ** 2:
+                self.top_patterns.append((reward, full_path.copy()))
                 self.top_patterns = sorted(self.top_patterns, key=lambda x: -x[0])[:self.top_n]
+
+        # Show incomplete paths for debugging
+        # paths = self.training_env.get_attr("path")
+        # for p in paths:
+        #    if 0 < len(p) < self.grid_size ** 2:
+        #        clean_path = [int(i) for i in p]
+        #        print(f"Incomplete path: {clean_path}")
 
         # Display update
         if self.num_timesteps - self.last_display_update >= 250:
             self.last_display_update = self.num_timesteps
             os.system('cls' if os.name == 'nt' else 'clear')
             print(f"Step: {self.num_timesteps}")
-            if reward is not None:
-                print(f"Latest reward: {reward:.4f}")
+            print(f"Latest rewards: {[f'{r:.4f}' for r in rewards]}")
             print("\nTop Patterns (full-length only):")
             for i, (r, path) in enumerate(self.top_patterns, 1):
                 print(f" {i}. Reward: {r:.4f} — Path: {path}")
@@ -51,7 +57,7 @@ class BestPatternsCallback(BaseCallback):
 # Visualize best pattern
 # -----------------------------
 def render_best_pattern(path, grid_size):
-    coords_map = dot_coords(grid_size)
+    coords_map = generate_coordinate_map(grid_size)
     coords_path = [coords_map[dot + 1] for dot in path]
 
     x = [c[1] for c in coords_path]
@@ -107,7 +113,7 @@ def main():
         eval_env,
         best_model_save_path="./logs/best_model",
         log_path="./logs/eval",
-        eval_freq=10000,
+        eval_freq=100,
         deterministic=True,
         render=False
     )

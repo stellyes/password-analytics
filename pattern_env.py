@@ -5,7 +5,7 @@ import gymnasium
 
 class PatternEnv(gymnasium.Env):
     
-    def __init__(self, grid_size=3):
+    def __init__(self, grid_size=4):
         super(PatternEnv, self).__init__()
 
         # Generating the grid space 
@@ -17,6 +17,7 @@ class PatternEnv(gymnasium.Env):
         self.action_space = gymnasium.spaces.Discrete(self.coordinates)
         self.observation_space = gymnasium.spaces.MultiBinary(self.coordinates)
 
+        self.last_full_path = None
         self.reset()
 
     def reset(self, *, seed=None, options=None):
@@ -29,19 +30,21 @@ class PatternEnv(gymnasium.Env):
         # To keep track of the player's path
         self.path = []
         self.visited = numpy.zeros(self.coordinates, dtype=numpy.int8)
+        self.current_position = None
+        self.last_full_path = None
 
-        # "I'm giving my player the map, and a 'you are here' mark"
-        # I'm already over this analogy
-        start = self.np_random.integers(self.coordinates)
-        self.visited[start] = 1
-        self.path.append(start)
-        self.current_position = start
-
+        # Resetting the step count
+        self.step_count = 0
         return self.visited.copy(), {}
 
     def step(self, action):
         done = False
         reward = 0.0
+
+        # Cap max episode length
+        self.step_count += 1
+        if self.step_count >= self.coordinates * 2:
+            done = True
 
         if self.visited[action] or \
             self.current_position is not None and \
@@ -49,26 +52,27 @@ class PatternEnv(gymnasium.Env):
             # Strongly discouraging staying in  
             # place and revisiting points
             reward -= 0.5
-            done = True
         else:
-            intermediates = self.get_intermediate_points(self.current_position, action)
+            intermediates = []
+            if self.current_position is not None:
+                intermediates = self.get_intermediate_points(self.current_position, action)
 
             if any(self.visited[i] for i in intermediates):
-                reward -= 0.5
-                done = True
+                # Discourage using intermediates that have been visited
+                reward -= 0.2
             else:
                 # We want to reward the intersections between
                 # visited points and intermediates.
                 # Increases complexity with "harmless overlapping".
                 intersections = list(set(intermediates) & set(self.visited))
                 for i in intersections:
-                    reward += 0.15
+                    reward += 0.2
 
                 for i in intermediates:
                     self.visited[i] = 1
                     self.path.append(i)
                     # Discourage wasteful moves
-                    reward -= 0.3 
+                    reward -= 0.2
                 
                 self.visited[action] = 1
                 self.path.append(action)
@@ -77,20 +81,17 @@ class PatternEnv(gymnasium.Env):
                 # Calculate total path complexity and close
                 if len(self.path) == self.coordinates:
                     path_coordinates = [self.map[point + 1] for point in self.path]
-                    reward += compute_complexity(path_coordinates)
+                    reward += compute_complexity(path_coordinates, self.size) + 2
                     done = True
                 else:
-                    # Multiplier for longer paths
-                    reward += 0.05 + len(self.path) * 0.025
+                    # Multiplier for continuing the path
+                    reward += 0.2
 
-        # If the player has visited all points,
-        # we want to reward them for completing the path
-        if len(self.path) == self.coordinates and done:
-            reward += reward * (1 - len(self.path) - self.coordinates)
+
         # If the player quits early
         # HEAVY penalty for not completing the path
-        elif done and len(self.path) < self.coordinates: 
-            reward -= 5.0 * (1 - len(self.path) / self.coordinates)
+        if done and len(self.path) < self.coordinates:
+            reward -= 0.5 * (1 - len(self.path) / self.coordinates)
 
         return self.visited.copy(), reward, done, False, {}
 
@@ -172,4 +173,4 @@ def compute_complexity(path, grid_size=4):
         distance_score *= (0.25 - (0.25 * (i / len(path) - 1)))
         score += distance_score
         
-        return max(0.0, score)
+    return max(0.0, score)
