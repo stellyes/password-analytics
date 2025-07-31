@@ -1,247 +1,175 @@
 import math
-import gymnasium as gym
-from gymnasium import spaces
-import numpy as np
-from math import atan2, degrees, sqrt
+import numpy
+import gymnasium
 
 
-class PatternEnv(gym.Env):
-    def __init__(self, grid_size=4):
+class PatternEnv(gymnasium.Env):
+    
+    def __init__(self, grid_size=3):
         super(PatternEnv, self).__init__()
-        self.grid_size = grid_size
-        self.total_dots = grid_size ** 2
-        self.coords_map = dot_coords(grid_size)
 
-        self.action_space = spaces.Discrete(self.total_dots)
-        self.observation_space = spaces.MultiBinary(self.total_dots)
+        # Generating the grid space 
+        self.size = grid_size
+        self.coordinates = grid_size ** 2
+        self.map = generate_coordinate_map(grid_size)
 
-        self.max_steps = self.total_dots * 2  # Optional safeguard
+        # Generate RL space
+        self.action_space = gymnasium.spaces.Discrete(self.coordinates)
+        self.observation_space = gymnasium.spaces.MultiBinary(self.coordinates)
 
         self.reset()
 
     def reset(self, *, seed=None, options=None):
+        # Generate a new seed for current episode
+        # or, the "player" starts the game
         super().reset(seed=seed)
         if seed is not None:
-            self.np_random, _ = gym.utils.seeding.np_random(seed)
+            self.np_random, _ = gymnasium.utils.seeding.np_random(seed)
 
+        # To keep track of the player's path
         self.path = []
-        self.visited = np.zeros(self.total_dots, dtype=np.int8)
-        self.steps = 0
+        self.visited = numpy.zeros(self.coordinates, dtype=numpy.int8)
 
-        start = self.np_random.integers(self.total_dots)
+        # "I'm giving my player the map, and a 'you are here' mark"
+        # I'm already over this analogy
+        start = self.np_random.integers(self.coordinates)
         self.visited[start] = 1
         self.path.append(start)
-        self.current_pos = start
+        self.current_position = start
 
         return self.visited.copy(), {}
 
     def step(self, action):
-        self.steps += 1
         done = False
         reward = 0.0
-        truncated = False
 
-        if self.visited[action]:
-            reward = -1.0
-            done = True
-        elif action == self.current_pos:
-            reward = -0.5
+        if self.visited[action] or \
+            self.current_position is not None and \
+                action == self.current_position:
+            # Strongly discouraging staying in  
+            # place and revisiting points
+            reward -= 0.5
             done = True
         else:
-            intermediates = self.get_intermediate_dots(self.current_pos, action)
-            invalid = any(self.visited[i] for i in intermediates)
+            intermediates = self.get_intermediate_points(self.current_position, action)
 
-            if invalid:
-                reward = -1.0
+            if any(self.visited[i] for i in intermediates):
+                reward -= 0.5
                 done = True
             else:
+                # We want to reward the intersections between
+                # visited points and intermediates.
+                # Increases complexity with "harmless overlapping".
+                intersections = list(set(intermediates) & set(self.visited))
+                for i in intersections:
+                    reward += 0.15
+
                 for i in intermediates:
                     self.visited[i] = 1
                     self.path.append(i)
-
+                    # Discourage wasteful moves
+                    reward -= 0.3 
+                
                 self.visited[action] = 1
                 self.path.append(action)
-                self.current_pos = action
+                self.current_position = action
 
-                current_length = len(self.path)
-
-                # Encourage longer paths with a small step bonus
-                reward = 0.05 + 0.025 * current_length
-
-                if current_length == self.total_dots:
-                    coords_path = [self.coords_map[dot + 1] for dot in self.path]
-                    reward = compute_complexity(coords_path)
+                # Calculate total path complexity and close
+                if len(self.path) == self.coordinates:
+                    path_coordinates = [self.map[point + 1] for point in self.path]
+                    reward += compute_complexity(path_coordinates)
                     done = True
-                    print("Pattern complete:", self.path)
-                    print("Complexity score:", reward)
+                else:
+                    # Multiplier for longer paths
+                    reward += 0.05 + len(self.path) * 0.025
 
-                elif self.steps >= self.max_steps:
-                    reward = -1.0
-                    done = True
-                    print("Max steps reached. Path length:", current_length)
+        # If the player has visited all points,
+        # we want to reward them for completing the path
+        if len(self.path) == self.coordinates and done:
+            reward += reward * (1 - len(self.path) - self.coordinates)
+        # If the player quits early
+        # HEAVY penalty for not completing the path
+        elif done and len(self.path) < self.coordinates: 
+            reward -= 5.0 * (1 - len(self.path) / self.coordinates)
 
-                # Discard short patterns explicitly
-                elif current_length < self.grid_size ** 2 - 2:
-                    reward -= 0.5
-                    done = True
-                    print("Short pattern discarded:", [int(p) for p in self.path])
-
-        if done:
-            print("Episode ended. Path length:", len(self.path), "Reward:", reward)
-
-        return self.visited.copy(), reward, done, truncated, {}
+        return self.visited.copy(), reward, done, False, {}
 
 
-    def get_intermediate_dots(self, start, end):
-        x1, y1 = self.coords_map[start + 1]
-        x2, y2 = self.coords_map[end + 1]
+    def get_intermediate_points(self, start, end):
+        """Return all intermediate points passed through in a straight line."""
+        x1, y1 = self.map[start + 1]
+        x2, y2 = self.map[end + 1]
 
         dx = x2 - x1
         dy = y2 - y1
 
+        # Only consider straight lines or diagonals
         steps = max(abs(dx), abs(dy))
         if steps <= 1:
-            return []
+            return []  # no intermediates needed
 
         intermediates = []
         for i in range(1, steps):
             x = x1 + i * dx // steps
             y = y1 + i * dy // steps
-            for dot_idx, coord in self.coords_map.items():
+            # Find the dot index from (x, y)
+            for dot_idx, coord in self.map.items():
                 if coord == (x, y):
-                    intermediates.append(dot_idx - 1)
+                    intermediates.append(dot_idx - 1)  # back to 0-indexed
                     break
 
         return intermediates
 
-    def render(self, mode='human'):
-        print("🧩 Current path:", self.path)
-
-
-def dot_coords(n):
+def generate_coordinate_map(n):
+    '''Generates grid layout for n x n plot'''
     return {i * n + j + 1: (i, j) for i in range(n) for j in range(n)}
 
 
-# -------- COMPLEXITY SCORING --------
-def angle_score(p1, p2, p3):
-    angle1 = atan2(p2[1] - p1[1], p2[0] - p1[0])
-    angle2 = atan2(p3[1] - p2[1], p3[0] - p2[0])
-    delta = abs(degrees(angle2 - angle1)) % 360
-    if delta > 180:
-        delta = 360 - delta
-    if delta % 45 == 0:
-        return delta / 180 * 0.5
-    return delta / 180
+def angle_score(p1, p2, p3, penalty):
+    angle1 = math.atan2(p2[1] - p1[1], p2[0] - p1[0])
+    angle2 = math.atan2(p3[1] - p2[1], p3[0] - p2[0])
+    delta = abs(math.degrees(angle2 - angle1) - 180) % 360
+
+    # Discourage standard angles
+    # More loss if angles occur earlier in path
+    if (delta in [0, 45, math.inf]):
+        return -0.6 * (1 - (penalty[0]/penalty[1]))
+
+    # Reward sharper angles
+    return 0.3 + (0.3 * (delta - 180)/180)  
+
+def direction_score(p1, p2, p3):
+    # 1 represents up and right
+    # -1 represents down and left    
+    v1_direction = 1 if p1[1] < p2[1] else -1
+    v2_direction = 1 if p2[1] < p3[1] else -1
+    h1_direction = 1 if p1[0] < p2[0] else -1
+    h2_direction = 1 if p2[0] < p3[0] else -1
+
+    # Reward sharper angles
+    direction_change = [
+        bool(v1_direction != v2_direction),
+        bool(h1_direction != h2_direction)
+    ]
+    return 0.15 * direction_change.count(True)
 
 
-def direction_category(p1, p2):
-    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
-    if dx == 0:
-        return 'vertical'
-    elif dy == 0:
-        return 'horizontal'
-    else:
-        return 'diagonal'
+def compute_complexity(path, grid_size=4):
+    score = 0
 
-
-def count_direction_changes(path):
-    categories = [direction_category(path[i], path[i + 1]) for i in range(len(path) - 1)]
-    changes = sum(1 for i in range(1, len(categories)) if categories[i] != categories[i - 1])
-    return changes / max(1, len(categories) - 1)
-
-
-def angle_variance(path):
-    if len(path) < 3:
-        return 0.0
-    angles = []
+    # Calculate angle and length complexity
     for i in range(1, len(path) - 1):
-        a1 = atan2(path[i][1] - path[i - 1][1], path[i][0] - path[i - 1][0])
-        a2 = atan2(path[i + 1][1] - path[i][1], path[i + 1][0] - path[i][0])
-        delta = abs(degrees(a2 - a1)) % 360
-        if delta > 180:
-            delta = 360 - delta
-        angles.append(delta)
-    return np.std(angles) / 180
+        x1, y1 = path[i - 1]
+        x2, y2 = path[i]
+        x3, y3 = path[i + 1]
 
+        score += angle_score((x1, y1), (x2, y2), (x3, y3), (i, len(path) - 2))
+        score += direction_score((x1, y1), (x2, y2), (x3, y3))
 
-def avg_center_distance(path, grid_size):
-    if not path:
-        return 0.0
-    center = (grid_size - 1) / 2
-    dists = [sqrt((x - center) ** 2 + (y - center) ** 2) for x, y in path]
-    return sum(dists) / len(dists)
-
-
-def is_standard_angle_segment(p1, p2):
-    dx = abs(p2[0] - p1[0])
-    dy = abs(p2[1] - p1[1])
-    return dx == 0 or dy == 0 or dx == dy
-
-
-def standard_angle_penalty(p1, p2):
-    dx = abs(p2[0] - p1[0])
-    dy = abs(p2[1] - p1[1])
-    if dx == 0 or dy == 0:
-        return -1.0
-    elif dx == dy:
-        return -0.75
-    return 0.5
-
-
-def compute_complexity(path):
-    if len(path) < 2:
-        return 0.0
-
-    total_score = 0.0
-    total_length = 0.0
-    direction_changes = 0
-    angles = []
-    irregular_segments = 0
-
-    prev_dx, prev_dy = None, None
-
-    for i in range(len(path) - 1):
-        x1, y1 = path[i]
-        x2, y2 = path[i + 1]
-        dx = x2 - x1
-        dy = y2 - y1
-        dist = math.hypot(dx, dy)
-        total_length += dist
-
-        angle_bonus = standard_angle_penalty((x1, y1), (x2, y2))
-        if angle_bonus > 0:
-            irregular_segments += 1
-
-        total_score += dist + angle_bonus
-
-        if prev_dx is not None and prev_dy is not None:
-            if (dx, dy) != (prev_dx, prev_dy):
-                direction_changes += 1
-
-            dot = prev_dx * dx + prev_dy * dy
-            mag1 = math.hypot(prev_dx, prev_dy)
-            mag2 = math.hypot(dx, dy)
-            if mag1 > 0 and mag2 > 0:
-                cos_angle = dot / (mag1 * mag2)
-                cos_angle = max(-1.0, min(1.0, cos_angle))
-                angle = math.acos(cos_angle)
-                angles.append(angle)
-
-        prev_dx, prev_dy = dx, dy
-
-    decay_factor = 0.98
-    step_bonus = sum((decay_factor ** i) for i in range(len(path)))
-    total_score += 0.3 * step_bonus
-
-    if len(path) >= 13:
-        total_score += 2.0
-
-    if len(path) > 1:
-        irregular_ratio = irregular_segments / (len(path) - 1)
-        total_score += 2.0 * irregular_ratio
-
-    if len(angles) > 1:
-        angle_var = np.var(angles)
-        total_score += 0.5 * angle_var
-
-    return round(max(0.0, min(total_score, 10.0)), 4)
+        # Rewards earlier, greedier 
+        # utilization of empty board
+        distance_score = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        distance_score *= (0.25 - (0.25 * (i / len(path) - 1)))
+        score += distance_score
+        
+        return max(0.0, score)
