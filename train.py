@@ -7,15 +7,17 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from pattern_env import PatternEnv, generate_coordinate_map
 
+
 # -----------------------------
-# Callback to track best N patterns
+# Callback to track best N complete patterns
 # -----------------------------
 class BestPatternsCallback(BaseCallback):
-    def __init__(self, top_n=5, verbose=0):
+    def __init__(self, top_n=5, grid_size=4, verbose=0):
         super().__init__(verbose)
         self.top_n = top_n
+        self.grid_size = grid_size
         self.top_patterns = []
-        self.last_display_update = -10  # ensures display on first run
+        self.last_display_update = -10
 
     def _on_step(self) -> bool:
         rewards = self.locals.get("rewards", [None])
@@ -25,19 +27,19 @@ class BestPatternsCallback(BaseCallback):
             current_path = self.training_env.get_attr("path")[0].copy()
             current_path = [int(dot) for dot in current_path]
 
-            # Add new reward
-            self.top_patterns.append((reward, current_path))
-            self.top_patterns = sorted(self.top_patterns, key=lambda x: -x[0])[:self.top_n]
+            if len(current_path) == self.grid_size ** 2:
+                # Only keep full-length patterns
+                self.top_patterns.append((reward, current_path))
+                self.top_patterns = sorted(self.top_patterns, key=lambda x: -x[0])[:self.top_n]
 
-        # Clear and print stats every 10 steps
-        if self.num_timesteps - self.last_display_update >= 1000:
+        # Display update
+        if self.num_timesteps - self.last_display_update >= 250:
             self.last_display_update = self.num_timesteps
-
             os.system('cls' if os.name == 'nt' else 'clear')
             print(f"Step: {self.num_timesteps}")
             if reward is not None:
                 print(f"Latest reward: {reward:.4f}")
-            print("\nTop Patterns:")
+            print("\nTop Patterns (full-length only):")
             for i, (r, path) in enumerate(self.top_patterns, 1):
                 print(f" {i}. Reward: {r:.4f} — Path: {path}")
             print("\n---")
@@ -53,7 +55,7 @@ def render_best_pattern(path, grid_size):
     coords_path = [coords_map[dot + 1] for dot in path]
 
     x = [c[1] for c in coords_path]
-    y = [grid_size - 1 - c[0] for c in coords_path]  # Flip vertically
+    y = [grid_size - 1 - c[0] for c in coords_path]
 
     plt.figure(figsize=(6, 6))
     plt.plot(x, y, marker='o', color='black', zorder=3)
@@ -68,15 +70,15 @@ def render_best_pattern(path, grid_size):
     plt.tight_layout()
     plt.show()
 
+
 # -----------------------------
 # Main training logic
 # -----------------------------
 def main():
     grid_size = 4
-    num_envs = 10
+    num_envs = 4
     model_path = "model"
 
-    # Create environments
     envs = [lambda gs=grid_size: PatternEnv(grid_size=gs) for _ in range(num_envs)]
     env = VecMonitor(SubprocVecEnv(envs))
 
@@ -99,35 +101,39 @@ def main():
         )
 
     # Callbacks
-    best_patterns_callback = BestPatternsCallback(top_n=5, verbose=1)
+    best_patterns_callback = BestPatternsCallback(top_n=5, grid_size=grid_size, verbose=1)
     eval_env = PatternEnv(grid_size=grid_size)
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path="./logs/best_model",
         log_path="./logs/eval",
-        eval_freq=100000,
+        eval_freq=10000,
         deterministic=True,
         render=False
     )
 
-    # Training
+    # Train
     model.learn(
-        total_timesteps=10_000_000,
+        total_timesteps=200_000,
         callback=[best_patterns_callback, eval_callback]
     )
 
     # Cleanup
     env.close()
-
     print("\nTraining complete!")
-    best_reward, best_pattern = best_patterns_callback.top_patterns[0]
-    print(f"Best reward: {best_reward:.2f}")
-    print(f"Best pattern: {best_pattern}")
-    render_best_pattern(best_pattern, grid_size)
+
+    if best_patterns_callback.top_patterns:
+        best_reward, best_pattern = best_patterns_callback.top_patterns[0]
+        print(f"Best reward: {best_reward:.2f}")
+        print(f"Best pattern: {best_pattern}")
+        render_best_pattern(best_pattern, grid_size)
+    else:
+        print("No full-length patterns discovered.")
 
     print("Saving model...")
     model.save(model_path)
     print(f"Model saved to '{model_path}.zip'")
+
 
 if __name__ == "__main__":
     main()

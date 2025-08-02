@@ -83,8 +83,14 @@ class PatternEnv(gymnasium.Env):
                     # Multiplier for longer paths
                     reward += 0.05 + len(self.path) * 0.025
 
+        # If the player has visited all points,
+        # we want to reward them for completing the path
         if len(self.path) == self.coordinates and done:
             reward += reward * (1 - len(self.path) - self.coordinates)
+        # If the player quits early
+        # HEAVY penalty for not completing the path
+        elif done and len(self.path) < self.coordinates: 
+            reward -= 5.0 * (1 - len(self.path) / self.coordinates)
 
         return self.visited.copy(), reward, done, False, {}
 
@@ -145,7 +151,7 @@ def direction_score(p1, p2, p3):
         bool(v1_direction != v2_direction),
         bool(h1_direction != h2_direction)
     ]
-    return 0.075 * direction_change.count(True)
+    return 0.15 * direction_change.count(True)
 
 
 def compute_complexity(path, grid_size=4):
@@ -167,4 +173,3 @@ def compute_complexity(path, grid_size=4):
         score += distance_score
         
         return max(0.0, score)
-        
