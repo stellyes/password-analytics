@@ -5,7 +5,7 @@ import gymnasium
 
 class PatternEnv(gymnasium.Env):
     
-    def __init__(self, grid_size=3):
+    def __init__(self, grid_size=4):
         super(PatternEnv, self).__init__()
 
         # Generating the grid space 
@@ -43,54 +43,50 @@ class PatternEnv(gymnasium.Env):
         done = False
         reward = 0.0
 
-        if self.visited[action] or \
+        if self.visited[action] == 1 or \
             self.current_position is not None and \
                 action == self.current_position:
             # Strongly discouraging staying in  
             # place and revisiting points
-            reward -= 0.5
+            reward = -1
             done = True
         else:
+            # Random move 25% of the time
+            if numpy.random.rand() < 0.25:
+                unvisited = [i for i in range(self.coordinates) if not self.visited[i]]
+                if unvisited:
+                    action = numpy.random.choice(unvisited)
+
             intermediates = self.get_intermediate_points(self.current_position, action)
 
-            if any(self.visited[i] for i in intermediates):
-                reward -= 0.5
+            # Mark intermediate points visited
+            for point in intermediates:
+                if not self.visited[point]:
+                    self.visited[point] = 1
+                    self.path.append(point)
+                    reward -= 0.25
+
+            self.visited[action] = 1
+            self.path.append(action)
+            self.current_position = action
+
+            # Calculate total path complexity and close
+            if len(self.path) == self.coordinates:
+                path_coordinates = [self.map[point + 1] for point in self.path]
+                reward += compute_complexity(path_coordinates)
                 done = True
             else:
-                # We want to reward the intersections between
-                # visited points and intermediates.
-                # Increases complexity with "harmless overlapping".
-                intersections = list(set(intermediates) & set(self.visited))
-                for i in intersections:
-                    reward += 0.15
-
-                for i in intermediates:
-                    self.visited[i] = 1
-                    self.path.append(i)
-                    # Discourage wasteful moves
-                    reward -= 0.3 
-                
-                self.visited[action] = 1
-                self.path.append(action)
-                self.current_position = action
-
-                # Calculate total path complexity and close
-                if len(self.path) == self.coordinates:
-                    path_coordinates = [self.map[point + 1] for point in self.path]
-                    reward += compute_complexity(path_coordinates)
-                    done = True
-                else:
-                    # Multiplier for longer paths
-                    reward += 0.05 + len(self.path) * 0.025
+                # Multiplier for longer paths
+                reward += 0.1 + (len(self.path) * 0.025)
 
         # If the player has visited all points,
         # we want to reward them for completing the path
         if len(self.path) == self.coordinates and done:
-            reward += reward * (1 - len(self.path) - self.coordinates)
-        # If the player quits early
-        # HEAVY penalty for not completing the path
-        elif done and len(self.path) < self.coordinates: 
-            reward -= 5.0 * (1 - len(self.path) / self.coordinates)
+            reward += 1
+
+        # debug quick fix for this fuck ass problem
+        if reward > 0.8:
+            reward = -1     
 
         return self.visited.copy(), reward, done, False, {}
 
@@ -133,10 +129,10 @@ def angle_score(p1, p2, p3, penalty):
     # Discourage standard angles
     # More loss if angles occur earlier in path
     if (delta in [0, 45, math.inf]):
-        return -0.6 * (1 - (penalty[0]/penalty[1]))
+        return -0.8  
 
     # Reward sharper angles
-    return 0.3 + (0.3 * (delta - 180)/180)  
+    return (0.6 * (1 - delta/180))  
 
 def direction_score(p1, p2, p3):
     # 1 represents up and right
@@ -157,11 +153,19 @@ def direction_score(p1, p2, p3):
 def compute_complexity(path, grid_size=4):
     score = 0
 
+    if len(path) == 1:
+        return max(0.0, -1)
+
     # Calculate angle and length complexity
     for i in range(1, len(path) - 1):
         x1, y1 = path[i - 1]
         x2, y2 = path[i]
-        x3, y3 = path[i + 1]
+        x3, y3 = path[i + 1]         
+
+        # Strongly discourage "wall-hug method"
+        if x1 == x2 or x2 == x3 \
+        or y1 == y2 or y2 == y3:
+            score -= 0.5
 
         score += angle_score((x1, y1), (x2, y2), (x3, y3), (i, len(path) - 2))
         score += direction_score((x1, y1), (x2, y2), (x3, y3))
@@ -169,7 +173,7 @@ def compute_complexity(path, grid_size=4):
         # Rewards earlier, greedier 
         # utilization of empty board
         distance_score = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-        distance_score *= (0.25 - (0.25 * (i / len(path) - 1)))
+        distance_score += (0.25 - (0.25 * (i / len(path) - 1)))
         score += distance_score
         
-        return max(0.0, score)
+    return max(0.0, score)
