@@ -26,9 +26,10 @@ class BestPatternsCallback(BaseCallback):
             current_path = self.training_env.get_attr("path")[0].copy()
             current_path = [int(dot) for dot in current_path]
 
-            # Add new reward
-            self.top_patterns.append((reward, current_path))
-            self.top_patterns = sorted(self.top_patterns, key=lambda x: -x[0])[:self.top_n]
+            # Ignore patterns with reward > 1 or empty patterns
+            if reward <= 1.0 and len(current_path) > 0:
+                self.top_patterns.append((reward, current_path))
+                self.top_patterns = sorted(self.top_patterns, key=lambda x: -x[0])[:self.top_n]
 
         # Clear and print stats every 10 steps
         if self.num_timesteps - self.last_display_update >= 1000:
@@ -46,12 +47,13 @@ class BestPatternsCallback(BaseCallback):
         return True
 
 
+
 # -----------------------------
 # Visualize best pattern
 # -----------------------------
 def render_best_pattern(path, grid_size):
     coords_map = generate_coordinate_map(grid_size)
-    coords_path = [coords_map[dot + 1] for dot in path]
+    coords_path = [coords_map[dot] for dot in path]
 
     x = [c[1] for c in coords_path]
     y = [grid_size - 1 - c[0] for c in coords_path]  # Flip vertically

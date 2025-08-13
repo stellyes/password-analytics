@@ -38,143 +38,125 @@ class PatternEnv(gymnasium.Env):
         return self.visited.copy(), {}
 
     def step(self, action):
-        done = False
         reward = 0.0
+        done = False
 
-        # End episode early only if invalid move AND max steps reached
-        if self.visited[action] == 1 or \
-            (self.current_position is not None and action == self.current_position):
-            # Strongly discouraging staying in place and revisiting points
-            reward = -1
-            done = True
-        else:
-            # Random move 2% of the time
-            if numpy.random.rand() < 0.02:
-                unvisited = [i for i in range(self.coordinates) if not self.visited[i]]
-                if unvisited:
-                    action = numpy.random.choice(unvisited)
-
-            intermediates = self.get_intermediate_points(self.current_position, action)
-
-            # Mark intermediate points visited
-            for point in intermediates:
-                if not self.visited[point]:
-                    self.visited[point] = 1
-                    self.path.append(point)
-                    reward -= 0.25
-
-            # Mark final chosen action
+        # First move → always allowed
+        if self.current_position is None:
             self.visited[action] = 1
             self.path.append(action)
             self.current_position = action
+            # No big reward for just starting
+            return self.visited.copy(), 0.0, done, False, {}
 
-            # Multiplier for longer paths
-            reward += 0.1 + (len(self.path) * 0.025)
+        # Random move 7% of the time
+        #if numpy.random.rand() < 0.07:
+        #    unvisited = [i for i in range(self.coordinates) if not self.visited[i]]
+        #    if unvisited:
+        #       action = numpy.random.choice(unvisited)
 
-        # Increment step counter regardless of intermediates
-        self.step_count += 1
-
-        # End after exactly N steps
-        if self.step_count >= self.coordinates:
-            # Calculate complexity if all dots visited
-            if numpy.all(self.visited):
-                path_coordinates = [self.map[point + 1] for point in self.path]
-                reward += compute_complexity(path_coordinates)
-                reward += 1  # bonus for completion
+        # Invalid move → episode ends
+        if self.visited[action] == 1 or action == self.current_position:
+            reward = -1.0
             done = True
+            return self.visited.copy(), reward, done, False, {}
 
-        # Debug quick fix from your original code
-        if reward > 0.8:
-            reward = -1     
+        # Intermediate point check
+        intermediates, discourage_factor, dx, dy = self.get_intermediate_points(self.current_position, action)
+        if any(self.visited[i] for i in intermediates):
+            reward = -1.0
+            done = True
+            return self.visited.copy(), reward, done, False, {}
+
+        # Valid move → mark visited
+        self.visited[action] = 1
+        self.path.append(action)
+        self.current_position = action
+
+        norm_length = len(self.path) / self.coordinates
+        norm_dist = (abs(dx) + abs(dy)) / (2 * self.coordinates)
+        discourage_factor = 0.5 + norm_dist ** 2
+
+        # Base incremental reward scaled by path length and discourage factor
+        reward = 0.05 + 0.05 * discourage_factor
+        reward *= norm_length
+
+        # If all dots visited → bigger final reward
+        if len(self.path) == self.coordinates:
+            coord_path = [self.map[p] for p in self.path]
+            reward += 2.0 + compute_complexity(coord_path)
+            done = True
+        else:
+            # If episode ends prematurely, harsh penalty
+            if done:
+                reward -= 1.0
+            # Living penalty to encourage continuing
+            elif len(self.path) < 3:
+                reward -= 0.05
+
+        if done and len(self.path) >= 10:
+            reward = -1.0
 
         return self.visited.copy(), reward, done, False, {}
 
 
-
     def get_intermediate_points(self, start, end):
-        """Return all intermediate points passed through in a straight line."""
-
-        if start is None:
-            return [] #no intermediates for first point
-
-        x1, y1 = self.map[start + 1]
-        x2, y2 = self.map[end + 1]
-
-        dx = x2 - x1
-        dy = y2 - y1
-
-        # Only consider straight lines or diagonals
-        steps = max(abs(dx), abs(dy))
-        if steps <= 1:
-            return []  # no intermediates needed
-
+        """
+        Returns:
+            intermediates: list of points passed over between start and end
+            discourage_factor: multiplier to discourage boring/short moves
+        """
         intermediates = []
-        for i in range(1, steps):
-            x = x1 + i * dx // steps
-            y = y1 + i * dy // steps
-            # Find the dot index from (x, y)
-            for dot_idx, coord in self.map.items():
-                if coord == (x, y):
-                    intermediates.append(dot_idx - 1)  # back to 0-indexed
-                    break
 
-        return intermediates
+        start_x, start_y = self.map[start]
+        end_x, end_y = self.map[end]
+
+        dx = end_x - start_x
+        dy = end_y - start_y
+
+        # Calculate number of steps in the path
+        steps = max(abs(dx), abs(dy))
+        if steps > 1:
+            step_x = dx // steps
+            step_y = dy // steps
+            for k in range(1, steps):
+                intermediates.append((start_x + step_x * k, start_y + step_y * k))
+
+        # Map back to indices
+        intermediates_idx = [
+            idx for idx, coord in self.map.items() if coord in intermediates
+        ]
+
+        # Discourage factor based on Manhattan distance (shorter moves get smaller factors)
+        manhattan_dist = abs(dx) + abs(dy)
+        discourage_factor = 0.5 + (manhattan_dist / (2 * len(set(self.map.values()))))
+
+        return intermediates_idx, discourage_factor, dx, dy
+
 
 def generate_coordinate_map(n):
-    '''Generates grid layout for n x n plot'''
-    return {i * n + j + 1: (i, j) for i in range(n) for j in range(n)}
+    """Generates grid layout for n x n plot with 0-based keys."""
+    return {i * n + j: (i, j) for i in range(n) for j in range(n)}
 
 
-def angle_score(p1, p2, p3, penalty):
-    dx1, dy1 = p2[0] - p1[0], p2[1] - p1[1]
-    dx2, dy2 = p3[0] - p2[0], p3[1] - p2[1]
-
-    def slope(dx, dy):
-        if dx == 0:
-            return float('inf')  # vertical
-        return dy / dx
-
-    slope1 = slope(dx1, dy1)
-    slope2 = slope(dx2, dy2)
-
-    # Penalize forbidden slopes for either segment
-    forbidden = {0, float('inf'), 1, -1}
-    if slope1 in forbidden or slope2 in forbidden:
-        return -0.8
-
-    # Otherwise reward sharper turns
-    angle1 = math.atan2(dy1, dx1)
-    angle2 = math.atan2(dy2, dx2)
-    delta = abs((angle2 - angle1 + math.pi) % (2 * math.pi) - math.pi)
-    return 0.6 * (1 - delta / math.pi)  
-
-def direction_score(p1, p2, p3):
-    # 1 represents up and right
-    # -1 represents down and left    
-    v1_direction = 1 if p1[1] < p2[1] else -1
-    v2_direction = 1 if p2[1] < p3[1] else -1
-    h1_direction = 1 if p1[0] < p2[0] else -1
-    h2_direction = 1 if p2[0] < p3[0] else -1
-
-    # Reward sharper angles
-    direction_change = [
-        bool(v1_direction != v2_direction),
-        bool(h1_direction != h2_direction)
-    ]
-    return 0.15 * direction_change.count(True)
-
-
-def compute_complexity(path, dot_coords):
+def compute_complexity(path, dot_coords=None):
     """
     Compute complexity score for an Android-style unlock pattern.
     Higher is more complex, lower is simpler.
 
     Parameters:
-    - path: list of dot indices in the pattern
-    - dot_coords: dict mapping index -> (x, y) coordinates
+    - path: list of dot indices OR list of (x, y) coordinates.
+    - dot_coords: optional dict mapping index -> (x, y) coordinates.
+                  If None, 'path' is assumed to already be coordinate tuples.
     """
-    if len(path) < 2:
-        return -1.0  # no complexity
+    # If dot_coords is provided, convert indices to coordinates
+    if dot_coords is not None and path and not isinstance(path[0], tuple):
+        coords = [dot_coords[p] for p in path]
+    else:
+        coords = path
+
+    if len(coords) < 2:
+        return -1.0
 
     total_score = 0.0
     penalties = 0.0
@@ -184,36 +166,48 @@ def compute_complexity(path, dot_coords):
     prev_dir_cat = None
     direction_streak = 0
 
-    for i in range(1, len(path)):
-        x1, y1 = dot_coords[path[i - 1]]
-        x2, y2 = dot_coords[path[i]]
+    # Define standard angles in degrees (0°, 45°, 90°, 135°, 180°)
+    standard_angles = [0, 45, 90, 135, 180]
+    angle_penalty_strength = 3.0  # stronger penalty on exact matches
+
+    for i in range(1, len(coords)):
+        x1, y1 = coords[i - 1]
+        x2, y2 = coords[i]
 
         dx, dy = x2 - x1, y2 - y1
         segment_length = math.hypot(dx, dy)
 
-        # Calculate angle in degrees
+        # Compute angle in degrees normalized to [0, 180]
         angle = (math.degrees(math.atan2(dy, dx)) + 360) % 360
+        if angle > 180:
+            angle = 360 - angle
 
-        # --- 1. Penalize perfect multiples of 45° ---
-        angle_mod = angle % 45
-        angle_diff = min(angle_mod, 45 - angle_mod)
-        if angle_diff < 1e-6:  # perfect multiple of 45°
-            penalties += 2.0
+        # Calculate closest standard angle difference
+        angle_diffs = [abs(angle - sa) for sa in standard_angles]
+        min_diff = min(angle_diffs)
+
+        # Penalize angles near standard angles with a smooth penalty
+        # Strong penalty if within 5 degrees, tapering off up to 15 degrees
+        if min_diff < 5:
+            penalty = angle_penalty_strength * (1 - min_diff / 5)
+            penalties += penalty
+        elif min_diff < 15:
+            penalty = angle_penalty_strength * (1 - (min_diff - 5) / 10) * 0.5
+            penalties += penalty
         else:
-            # Reward for being away from perfect angles (max at 22.5° offset)
-            irregularity_bonus = (angle_diff / 22.5)  # normalized 0–1
-            bonuses += irregularity_bonus * 0.5
+            # Reward irregular angles more strongly
+            irregularity_bonus = min_diff / 180  # normalized 0–1
+            bonuses += irregularity_bonus * 0.7
 
-        # --- 2. Penalize repeated direction categories ---
-        # Categories: H(0), V(1), D(2)
-        if abs(dx) < 1e-6:  # vertical
-            dir_cat = 1
-        elif abs(dy) < 1e-6:  # horizontal
-            dir_cat = 0
-        elif abs(abs(dx) - abs(dy)) < 1e-6:  # perfect diagonal
-            dir_cat = 2
-        else:  # irregular
-            dir_cat = 3
+        # Penalize repeated direction categories (vertical, horizontal, diagonal, irregular)
+        if abs(dx) < 1e-6:
+            dir_cat = 1  # vertical
+        elif abs(dy) < 1e-6:
+            dir_cat = 0  # horizontal
+        elif abs(abs(dx) - abs(dy)) < 1e-6:
+            dir_cat = 2  # perfect diagonal
+        else:
+            dir_cat = 3  # irregular
 
         if prev_dir_cat is not None:
             if dir_cat == prev_dir_cat:
@@ -223,11 +217,11 @@ def compute_complexity(path, dot_coords):
                 direction_streak = 0
         prev_dir_cat = dir_cat
 
-        # --- 3. Penalize long straight jumps ---
+        # Penalize very long straight jumps (> 1.5 units)
         if dir_cat in (0, 1, 2) and segment_length > 1.5:
             penalties += 0.8 * (segment_length - 1.5)
 
-        # --- 4. Reward sharper turns ---
+        # Reward sharper turns between segments
         if prev_angle is not None:
             turn_angle = abs(angle - prev_angle)
             if turn_angle > 180:
@@ -236,13 +230,12 @@ def compute_complexity(path, dot_coords):
                 bonuses += 0.3
         prev_angle = angle
 
-        # --- Base score: encourage movement ---
-        total_score += segment_length * 0.1
+        # Reward longer moves earlier in the path
+        # Normalize by position to weight earlier segments more
+        position_weight = 1.5 - (i / len(coords))  # decreases linearly
+        total_score += segment_length * 0.1 * position_weight
 
-    # Final complexity score
     raw_score = total_score + bonuses - penalties
-
-    # Normalize (rough scaling so RL rewards aren't too extreme)
     normalized = max(-5.0, min(5.0, raw_score)) / 5.0
 
     return normalized
